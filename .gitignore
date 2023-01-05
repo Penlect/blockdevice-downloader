@@ -1,0 +1,6 @@
+base.tar.gz~
+*.img
+*.gz
+*.bmap
+OVMF_VARS.fd
+overlays/blockdevice-downloader/usr/local/bin/blockdevice-downloader

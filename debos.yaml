@@ -1,0 +1,189 @@
+{{- $hostname := or .hostname "blockdevice-downloader" -}}
+{{- $suite := or .suite "bookworm" -}}
+{{- $architecture := or .architecture "amd64" -}}
+{{- $name := or .name (printf "%s_%s-%s" $hostname $suite $architecture) -}}
+{{- $buildbase := or .buildbase "yes" -}}
+
+architecture: {{ $architecture }}
+
+actions:
+
+{{ if eq $buildbase "yes" }}
+
+  - action: debootstrap
+    suite: {{ $suite }}
+    components:
+      - main
+      - contrib
+      - non-free
+    mirror: https://deb.debian.org/debian
+    variant: minbase
+
+  - action: apt
+    packages:
+      - usr-is-merged
+
+  - action: run
+    description: Install security and recommended updates
+    chroot: true
+    command: apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+
+  - action: apt
+    description: Install system packages
+    recommends: true
+    packages:
+      - linux-image-amd64
+      - initramfs-tools
+      - firmware-linux
+      - intel-microcode
+      - amd64-microcode
+      - firmware-iwlwifi
+      - firmware-realtek
+      - firmware-linux
+      - systemd-sysv
+      - systemd-timesyncd
+      - systemd-resolved
+      - network-manager
+      - wireguard-tools
+      - dbus-user-session
+      - libnss-systemd
+      - libnss-myhostname
+      - libnss-resolve
+      - udev
+      - dbus
+      - default-dbus-session-bus
+      - sudo
+      - adduser
+      - swapspace
+      - ca-certificates
+      - iproute2
+      - openssh-server
+      - curl
+      - rsync
+      - nano
+      - htop
+      - less
+      - grub-efi
+      - grub2-common
+      - grub-pc-bin
+      # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=892229
+      - wireless-regdb
+      - gdisk
+      - fish
+      - less
+
+  - action: pack
+    file: base.tar.gz~
+    compression: gz
+
+{{ else }}
+
+  - action: unpack
+    file: base.tar.gz~
+
+{{ end }}
+
+  - action: overlay
+    source: overlays/networking
+
+  - action: run
+    chroot: true
+    script: scripts/setup-networking.sh
+
+  - action: overlay
+    source: overlays/blockdevice-downloader
+
+  - action: run
+    chroot: true
+    command: systemctl enable blockdevice-downloader
+
+  - action: run
+    chroot: true
+    command: echo blockdevice-downloader > /etc/hostname
+
+  - action: overlay
+    source: overlays/systemd-repart
+
+  - action: run
+    description: Set up user
+    chroot: true
+    script: scripts/setup-user.sh user blockdevice-downloader
+
+  - action: run
+    chroot: true
+    command: rm /var/lib/dbus/machine-id
+
+  - action: run
+    chroot: true
+    command: echo uninitialized > /etc/machine-id
+
+  - action: run
+    description: Remove apt package lists
+    chroot: true
+    command: rm -f /var/lib/apt/lists/*_dists_*
+
+  # Partition the image and switch to disk
+  - action: image-partition
+    imagename: {{ $name }}.img
+    imagesize: 3GB
+    partitiontype: gpt
+    partitions:
+      # https://en.wikipedia.org/wiki/BIOS_boot_partition
+      - name: bios-boot
+        parttype: 21686148-6449-6E6F-744E-656564454649
+        fs: fat32
+        start: 0%
+        end: 1MB
+      - name: efi
+        fs: fat32
+        start: 1MB
+        end: 256MB
+        flags: [ esp ]
+      - name: boot
+        fs: ext2
+        start: 256MB
+        end: 756MB
+      - name: test
+        fs: ext4
+        start: 756MB
+        end: 1025MB
+      - name: root
+        parttype: 4f68bce3-e8cd-4db1-96e7-fbcaf984b709
+        fs: ext4
+        start: 1025MB
+        end: 100%
+    mountpoints:
+      - mountpoint: /boot
+        partition: boot
+      - mountpoint: /boot/efi
+        partition: efi
+      - mountpoint: /
+        partition: root
+        options: [ x-systemd.growfs ]
+
+  - action: filesystem-deploy
+    description: Deploying filesystem onto image
+
+  - action: run
+    chroot: true
+    command: grub-install --target=x86_64-efi --no-nvram --efi-directory=/boot/efi --force-extra-removable
+
+  - action: run
+    chroot: true
+    command: grub-install --target=i386-pc --no-nvram /dev/vda
+
+  - action: run
+    chroot: true
+    command: update-grub
+
+  - action: run
+    postprocess: true
+    command: fallocate -d {{ $name }}.img
+
+  - action: run
+    postprocess: true
+    command: bmaptool create {{ $name }}.img > {{ $name }}.img.bmap
+
+  - action: run
+    postprocess: true
+    command: gzip -f {{ $name }}.img
